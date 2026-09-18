@@ -1,0 +1,26 @@
+# .clang-format —— 保存 .c/.h 时自动排版的规则
+# 需要系统里有 clang-format，以及 VS Code 插件 xaver.clang-format
+# 改完本文件后，对某个源文件执行「Format Document」即可看到效果
+
+BasedOnStyle: LLVM
+
+# 缩进 4 空格，和大多数 C 教材一致
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+
+# 一行尽量不超过 80 列，投影/教材排版比较友好
+ColumnLimit: 80
+
+# if / for / 函数的左花括号不换行：void f() {
+BreakBeforeBraces: Attach
+
+# 指针靠类型：int *p
+PointerAlignment: Right
+
+# 允许短函数/短 if 写成一行，但一般还是会按块排
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+
+# include 分组：系统头文件一组，工程头文件一组
+SortIncludes: true
