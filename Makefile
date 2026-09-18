@@ -6,28 +6,21 @@
 #   make clean    删掉 build/ 目录
 #   make format   用 clang-format 格式化 src/、include/ 和 tests/
 #   make help     打印这份帮助
-#
-# 可覆盖的变量：
-#   make test SANITIZE=0    关掉 ASan / UBSan
-#   make CC=clang           换编译器
 
 CC       ?= cc
 CSTD     ?= c11
-CFLAGS   ?= -std=$(CSTD) -Wall -Wextra -Wpedantic -g
+CFLAGS   ?= -std=$(CSTD) -g
 LDFLAGS  ?=
 
-# 默认打开 AddressSanitizer + UndefinedBehaviorSanitizer。
+# 始终打开 AddressSanitizer + UndefinedBehaviorSanitizer，检测到错误立即失败。
 # 数组越界、重复 free、use-after-free、内存泄漏、有符号溢出都会直接报出来，
 # 学内存管理时这两个工具比 printf 好用得多。
 #
 # 测试里会故意请求一块不可能分配到的内存，用来验证分配失败时的返回值。
 # 默认情况下 ASan 遇到这种请求会直接终止进程（allocation-size-too-big），
 # allocator_may_return_null=1 让它改成像真实 malloc 一样返回 NULL。
-SANITIZE ?= 1
-ifeq ($(SANITIZE),1)
-SANFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
-endif
-SANENV := ASAN_OPTIONS=allocator_may_return_null=1
+override SANFLAGS := -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+override SANENV := ASAN_OPTIONS=allocator_may_return_null=1 UBSAN_OPTIONS=halt_on_error=1
 
 SRCDIR   := src
 INCDIR   := include
@@ -51,7 +44,7 @@ all: $(BIN)
 $(BIN): $(OBJS)
 	$(CC) $(CFLAGS) $(SANFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(BUILDDIR)/%.o: %.c
+$(BUILDDIR)/%.o: %.c Makefile
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SANFLAGS) -MMD -MP -c $< -o $@
 

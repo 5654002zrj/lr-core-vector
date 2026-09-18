@@ -41,7 +41,7 @@ int push_back(vector *v, int value) {
     return 0;
 }
 
-int pop_back(vector *v) {
+int pop_back(vector *v, int *out) {
     return 0;
 }
 

@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include "vector.h"
@@ -74,15 +75,22 @@ static void check_int(long long actual, long long expected, const char *what,
     } while (0)
 
 /* 断言一次调用成功（返回 0） */
-#define CHECK_OK(expr, what) CHECK_EQ((expr), 0, (what))
+#define CHECK_OK(expr, what)                                                   \
+    do {                                                                       \
+        int result = (expr);                                                   \
+        CHECK_EQ(result, 0, (what));                                           \
+        if (result != 0) {                                                     \
+            exit(EXIT_FAILURE);                                                \
+        }                                                                      \
+    } while (0)
 
-/* ===================== 带 out 参数的读取 ===================== */
+/* ===================== 带 out 参数的读取与弹出 ===================== */
 
-/* vector.h 的约定：读元素的函数返回 0 表示成功并写入 *out，
+/* vector.h 的约定：读取或弹出元素的函数返回 0 表示成功并写入 *out，
  * 返回 -1 表示失败且不写 *out。
  *
  * 测试里统一先把 out 填成哨兵值，这样「失败却写了 *out」也能被抓出来。
- * 下面三个包装只是让断言读起来还像原来那样，例如 GET(&v, 0) == 1。 */
+ * 下面四个包装只是让断言读起来还像原来那样，例如 GET(&v, 0) == 1。 */
 #define NOT_WRITTEN INT_MIN
 
 static int get_ok(const vector *v, size_t index, int line) {
@@ -112,17 +120,33 @@ static int back_ok(const vector *v, int line) {
     return out;
 }
 
+static int pop_ok(vector *v, int line) {
+    int out = NOT_WRITTEN;
+    if (pop_back(v, &out) != 0) {
+        check_bool(0, "pop_back 应该成功", line);
+        return NOT_WRITTEN;
+    }
+    return out;
+}
+
 #define GET(v, index) get_ok((v), (index), __LINE__)
 #define FRONT(v) front_ok((v), __LINE__)
 #define BACK(v) back_ok((v), __LINE__)
+#define POP(v) pop_ok((v), __LINE__)
 
-/* 先零初始化再交给 vector_init：
- * 这样即使 vector_init 还没实现，测试读到的也只是 NULL 而不是野指针，
- * 断言会安安静静地失败，而不是把整个测试进程一起带走。 */
+/* 初始化失败或状态无效时立即停止，避免后续测试使用无效指针。 */
 static vector make_vector(size_t capacity) {
-    vector v = {NULL, NULL, NULL};
-    check_bool(vector_init(&v, capacity) == 0, "vector_init 应该成功",
-               __LINE__);
+    int sentinel = 123;
+    vector v = {&sentinel, &sentinel, &sentinel};
+    CHECK_OK(vector_init(&v, capacity), "vector_init 应该成功");
+    int valid = capacity == 0
+                    ? v.data == NULL && v.end == NULL && v.cap == NULL
+                  : v.data != NULL && v.data != &sentinel &&
+                      v.end == v.data && v.cap != NULL;
+    CHECK_BOOL(valid, "vector_init 后三个指针必须有效，否则停止测试");
+    if (!valid) {
+        exit(EXIT_FAILURE);
+    }
     return v;
 }
 
@@ -132,19 +156,37 @@ static void test_init_destroy(void) {
     vector v = make_vector(4);
     CHECK_EQ(size(&v), 0, "init 之后 size 应该是 0");
     CHECK_EQ(capacity(&v), 4, "init 之后 capacity 应该等于传入的容量");
-    CHECK_BOOL(empty(&v), "init 之后 empty 应该是真");
+    CHECK_EQ(empty(&v), 1, "init 之后 empty 应该是 1");
 
     /* 容量为 0 时不应该分配内存 */
     vector e = make_vector(0);
     CHECK_EQ(size(&e), 0, "capacity 为 0 时 size 应该是 0");
     CHECK_EQ(capacity(&e), 0, "capacity 为 0 时 capacity 应该是 0");
-    CHECK_BOOL(e.data == NULL, "capacity 为 0 时 data 应该是 NULL");
+    CHECK_BOOL(e.data == NULL && e.end == NULL && e.cap == NULL,
+               "capacity 为 0 时三个指针应该都是 NULL");
     vector_destroy(&e);
 
     vector_destroy(&v);
     CHECK_BOOL(v.data == NULL && v.end == NULL && v.cap == NULL,
                "destroy 之后三个指针都应该是 NULL");
     vector_destroy(&v); /* 再 destroy 一次也应该安全 */
+    CHECK_BOOL(v.data == NULL && v.end == NULL && v.cap == NULL,
+               "重复 destroy 后三个指针仍应该都是 NULL");
+    CHECK_EQ(size(&v), 0, "destroy 之后 size 应该是 0");
+    CHECK_EQ(capacity(&v), 0, "destroy 之后 capacity 应该是 0");
+    CHECK_EQ(empty(&v), 1, "destroy 之后 empty 应该是 1");
+
+    clear(&v);
+    CHECK_OK(reserve(&v, 0), "零容量 reserve(0) 应该成功");
+    CHECK_OK(shrink_to_fit(&v), "零容量 shrink_to_fit 应该成功");
+    CHECK_BOOL(v.data == NULL && v.end == NULL && v.cap == NULL,
+               "零容量 clear、reserve(0)、shrink 后仍应该全 NULL");
+    CHECK_OK(reserve(&v, 3), "零容量 reserve(3) 应该成功");
+    CHECK_EQ(size(&v), 0, "零容量 reserve 后 size 仍应该是 0");
+    CHECK_BOOL(capacity(&v) >= 3, "零容量 reserve 后应该获得所需容量");
+    CHECK_OK(push_back(&v, 42), "reserve 后应该可以追加元素");
+    CHECK_EQ(GET(&v, 0), 42, "reserve 后追加的元素应该可以读取");
+    vector_destroy(&v);
 }
 
 static void test_push_back(void) {
@@ -156,8 +198,13 @@ static void test_push_back(void) {
     }
 
     CHECK_EQ(size(&v), 5, "push 5 次之后 size 应该是 5");
-    CHECK_BOOL(!empty(&v), "push 之后 empty 应该是假");
-    CHECK_BOOL(capacity(&v) >= 5, "push 5 次之后 capacity 不应该小于 5");
+    CHECK_EQ(empty(&v), 0, "push 之后 empty 应该是 0");
+    CHECK_EQ(capacity(&v), 8, "从容量 2 连续 push 5 次之后容量应该是 8");
+    int valid = v.data != NULL && v.end != NULL && v.cap != NULL;
+    CHECK_BOOL(valid, "push 成功后三个指针必须非 NULL");
+    if (!valid) {
+        exit(EXIT_FAILURE);
+    }
     CHECK_EQ(v.end - v.data, (ptrdiff_t)size(&v),
              "三个指针要自洽：end - data 应该等于 size()");
 
@@ -177,49 +224,39 @@ static void test_push_back(void) {
 }
 
 static void test_auto_grow(void) {
-    vector v = make_vector(0);
-    size_t last_capacity = capacity(&v);
-
-    /* 每次扩容都是一次分配，这里统一只用一次断言汇报，避免刷屏 */
-    int push_ok = 1;
-    for (int i = 1; i <= 1000; i++) {
-        if (push_back(&v, i) != 0) {
-            push_ok = 0;
-            break;
+    const size_t initial_capacities[] = {0, 1, 3};
+    for (size_t scenario = 0; scenario < 3; scenario++) {
+        vector v = make_vector(initial_capacities[scenario]);
+        size_t expected_capacity = initial_capacities[scenario];
+        int growth_ok = 1;
+        for (size_t index = 0; index < 1000; index++) {
+            if (index == expected_capacity) {
+                expected_capacity =
+                    expected_capacity ? expected_capacity * 2 : 1;
+            }
+            CHECK_OK(push_back(&v, (int)(index + 1)), "push_back 应该成功");
+            if (capacity(&v) != expected_capacity || size(&v) != index + 1) {
+                growth_ok = 0;
+            }
         }
+        CHECK_BOOL(growth_ok, "容量为 0 时增至 1，满时严格翻倍，未满时不扩容");
+        CHECK_EQ(capacity(&v), expected_capacity,
+                 "最终容量应该符合两倍增长序列");
+        CHECK_EQ(size(&v), 1000, "连续 push 1000 次之后 size 应该是 1000");
 
-        if (size(&v) > last_capacity) {
-            /* 一旦装不下就必须扩容 */
-            CHECK_BOOL(capacity(&v) >= size(&v),
-                       "元素个数超过容量之后，capacity 应该跟着长大");
-            last_capacity = capacity(&v);
+        long long sum = 0;
+        int order_ok = 1;
+        for (size_t index = 0; index < 1000; index++) {
+            int value = NOT_WRITTEN;
+            if (get(&v, index, &value) != 0 || value != (int)(index + 1)) {
+                order_ok = 0;
+            }
+            sum += value;
         }
+        CHECK_BOOL(order_ok, "多次扩容搬移之后，元素顺序应该仍然是 1..1000");
+        CHECK_EQ(sum, 500500, "1 到 1000 的和应该是 500500");
+        vector_destroy(&v);
     }
-    CHECK_BOOL(push_ok, "1000 次 push_back 应该全部成功");
-
-    CHECK_EQ(size(&v), 1000, "连续 push 1000 次之后 size 应该是 1000");
-    CHECK_BOOL(capacity(&v) >= 1000,
-               "装下 1000 个元素后 capacity 应该至少是 1000");
-    CHECK_BOOL(capacity(&v) <= 1000 * 2,
-               "容量涨得比 2 倍还快说明扩容策略有问题");
-
-    long long sum = 0;
-    int order_ok = 1;
-    for (size_t i = 0; i < size(&v); i++) {
-        int value = NOT_WRITTEN;
-        if (get(&v, i, &value) != 0) {
-            order_ok = 0;
-            continue;
-        }
-        sum += value;
-        if (value != (int)(i + 1)) {
-            order_ok = 0;
-        }
-    }
-    CHECK_BOOL(order_ok, "多次扩容搬移之后，元素顺序应该仍然是 1..1000");
-    CHECK_EQ(sum, 500500, "1 到 1000 的和应该是 500500");
-
-    vector_destroy(&v);
 }
 
 static void test_access(void) {
@@ -248,15 +285,25 @@ static void test_pop_back(void) {
         CHECK_OK(push_back(&v, i), "容量足够时 push_back 应该成功");
     }
 
-    CHECK_EQ(pop_back(&v), 3, "pop_back 应该返回原来的末元素");
+    CHECK_EQ(POP(&v), 3, "pop_back 应该通过 out 返回原来的末元素");
     CHECK_EQ(size(&v), 2, "pop_back 之后 size 应该减一");
     CHECK_EQ(BACK(&v), 2, "pop_back 之后 back 应该是新的末元素");
     CHECK_EQ(capacity(&v), 8, "pop_back 不应该改变 capacity");
 
-    CHECK_EQ(pop_back(&v), 2, "第二次 pop_back 应该返回 2");
-    CHECK_EQ(pop_back(&v), 1, "第三次 pop_back 应该返回 1");
+    CHECK_EQ(POP(&v), 2, "第二次 pop_back 应该通过 out 返回 2");
+    CHECK_EQ(POP(&v), 1, "第三次 pop_back 应该通过 out 返回 1");
     CHECK_EQ(size(&v), 0, "全部 pop 完之后 size 应该是 0");
-    CHECK_BOOL(empty(&v), "全部 pop 完之后 empty 应该是真");
+    CHECK_EQ(empty(&v), 1, "全部 pop 完之后 empty 应该是 1");
+
+    int out = 234;
+    vector before = v;
+    CHECK_EQ(pop_back(&v, &out), -1, "全部 pop 完后再次 pop 应该返回 -1");
+    CHECK_EQ(out, 234, "pop_back 失败时不应该写入 *out");
+    CHECK_BOOL(v.data == before.data && v.end == before.end &&
+                   v.cap == before.cap,
+               "pop_back 失败时三个指针应该保持不变");
+    CHECK_EQ(size(&v), 0, "pop_back 失败时 size 应该保持不变");
+    CHECK_EQ(capacity(&v), 8, "pop_back 失败时 capacity 应该保持不变");
 
     /* 元素被 pop 掉之后容量还在，可以继续 push */
     CHECK_OK(push_back(&v, 99), "还有剩余容量时 push_back 应该成功");
@@ -301,11 +348,19 @@ static void test_shrink_to_fit(void) {
         CHECK_EQ(GET(&v, i), i, "shrink_to_fit 搬移之后元素应该保持不变");
     }
 
+    CHECK_OK(shrink_to_fit(&v), "容量等于大小时 shrink_to_fit 应该成功");
+    CHECK_EQ(capacity(&v), 5, "重复收缩不应该改变容量");
+    CHECK_EQ(size(&v), 5, "重复收缩不应该改变大小");
+    for (int index = 0; index < 5; index++) {
+        CHECK_EQ(GET(&v, index), index, "重复收缩不应该破坏已有元素");
+    }
+
     clear(&v);
     CHECK_OK(shrink_to_fit(&v), "空 vector 的 shrink_to_fit 应该成功");
     CHECK_EQ(capacity(&v), 0, "空 vector 收缩之后 capacity 应该是 0");
     CHECK_EQ(size(&v), 0, "空 vector 收缩之后 size 应该是 0");
-    CHECK_BOOL(v.data == NULL, "空 vector 收缩之后应该把内存还给系统");
+    CHECK_BOOL(v.data == NULL && v.end == NULL && v.cap == NULL,
+               "空 vector 收缩之后三个指针应该都是 NULL");
 
     CHECK_OK(push_back(&v, 1), "收缩到 0 之后 push_back 应该成功");
     CHECK_EQ(GET(&v, 0), 1, "收缩到 0 之后还能继续 push_back");
@@ -319,10 +374,14 @@ static void test_clear(void) {
         CHECK_OK(push_back(&v, i), "push_back 应该成功");
     }
 
+    int *data = v.data;
+    int *cap = v.cap;
     clear(&v);
     CHECK_EQ(size(&v), 0, "clear 之后 size 应该是 0");
-    CHECK_BOOL(empty(&v), "clear 之后 empty 应该是真");
+    CHECK_EQ(empty(&v), 1, "clear 之后 empty 应该是 1");
     CHECK_EQ(capacity(&v), 8, "clear 只清元素不释放内存，capacity 应该不变");
+    CHECK_BOOL(v.data == data && v.cap == cap && v.end == data,
+               "clear 应该保留缓冲区并重置 end");
 
     CHECK_OK(push_back(&v, 99), "clear 之后 push_back 应该成功");
     CHECK_EQ(size(&v), 1, "clear 之后可以重新 push_back");
@@ -333,35 +392,29 @@ static void test_clear(void) {
 
 /* ===================== 错误处理 ===================== */
 
-/* 有 out 参数的读取函数，失败时不只是返回 -1，还必须「不写 *out」。
- * 只检查返回值的话，一个「失败了却仍然写了 *out」的实现会悄悄溜过去。 */
-#define CHECK_NOT_WRITTEN(out, what) CHECK_EQ((out), NOT_WRITTEN, (what))
-
 static void test_index_errors(void) {
     vector v = make_vector(4);
     CHECK_OK(push_back(&v, 10), "push_back 应该成功");
     CHECK_OK(push_back(&v, 20), "push_back 应该成功");
 
-    int out = NOT_WRITTEN;
-
-    /* get：size() 之外都必须失败 */
-    CHECK_EQ(get(&v, 2, &out), -1, "get(index == size) 应该返回 -1");
-    CHECK_NOT_WRITTEN(out, "get 失败时不应该写入 *out");
-    CHECK_EQ(get(&v, 100, &out), -1, "get(index 远大于 size) 应该返回 -1");
-    CHECK_NOT_WRITTEN(out, "get 失败时不应该写入 *out");
-    /* 容量还剩着，但 index >= size 依然算越界 */
-    CHECK_EQ(get(&v, 3, &out), -1, "容量够但 index >= size 也算越界");
-    CHECK_NOT_WRITTEN(out, "get 失败时不应该写入 *out");
-
-    /* set：越界必须失败，而且不能碰到任何元素 */
-    CHECK_EQ(set(&v, 2, 999), -1, "set(index == size) 应该返回 -1");
-    CHECK_EQ(set(&v, 100, 999), -1, "set(index 远大于 size) 应该返回 -1");
-    CHECK_EQ(set(&v, 3, 999), -1, "容量够但 index >= size 也算越界");
-    CHECK_EQ(size(&v), 2, "set 越界不应该改变 size");
-    CHECK_EQ(GET(&v, 0), 10, "set 越界不应该影响已有元素");
-    CHECK_EQ(GET(&v, 1), 20, "set 越界不应该影响已有元素");
+    const size_t indices[] = {2, 3, 100, SIZE_MAX - 1, SIZE_MAX};
+    const int sentinels[] = {INT_MIN, 234, INT_MAX};
+    for (size_t index = 0; index < sizeof(indices) / sizeof(indices[0]);
+         index++) {
+        for (size_t sentinel = 0; sentinel < 3; sentinel++) {
+            int out = sentinels[sentinel];
+            CHECK_EQ(get(&v, indices[index], &out), -1, "越界 get 应该返回 -1");
+            CHECK_EQ(out, sentinels[sentinel], "get 失败时不应该写入 *out");
+        }
+        CHECK_EQ(set(&v, indices[index], 999), -1, "越界 set 应该返回 -1");
+        CHECK_EQ(size(&v), 2, "set 越界不应该改变 size");
+        CHECK_EQ(capacity(&v), 4, "set 越界不应该改变 capacity");
+        CHECK_EQ(GET(&v, 0), 10, "set 越界不应该影响已有元素");
+        CHECK_EQ(GET(&v, 1), 20, "set 越界不应该影响已有元素");
+    }
 
     /* 边界值：最后一个合法下标必须成功 */
+    int out = NOT_WRITTEN;
     CHECK_EQ(get(&v, 1, &out), 0, "get(size - 1) 应该成功");
     CHECK_EQ(out, 20, "get(size - 1) 应该读到末元素");
     CHECK_EQ(set(&v, 1, 21), 0, "set(size - 1) 应该成功");
@@ -371,44 +424,98 @@ static void test_index_errors(void) {
 }
 
 static void test_empty_errors(void) {
-    vector v = make_vector(2);
-    int out = NOT_WRITTEN;
+    const size_t capacities[] = {0, 2};
+    const size_t indices[] = {0, 1, SIZE_MAX - 1, SIZE_MAX};
+    const int sentinels[] = {INT_MIN, 234, INT_MAX};
+    for (size_t scenario = 0; scenario < 2; scenario++) {
+        vector v = make_vector(capacities[scenario]);
+        for (size_t sentinel = 0; sentinel < 3; sentinel++) {
+            int out = sentinels[sentinel];
+            CHECK_EQ(front(&v, &out), -1, "空 vector 的 front 应该返回 -1");
+            CHECK_EQ(out, sentinels[sentinel], "front 失败时不应该写入 *out");
+            out = sentinels[sentinel];
+            CHECK_EQ(back(&v, &out), -1, "空 vector 的 back 应该返回 -1");
+            CHECK_EQ(out, sentinels[sentinel], "back 失败时不应该写入 *out");
+            out = sentinels[sentinel];
+            vector before = v;
+            CHECK_EQ(pop_back(&v, &out), -1,
+                     "空 vector 的 pop_back 应该返回 -1");
+            CHECK_EQ(out, sentinels[sentinel],
+                     "pop_back 失败时不应该写入 *out");
+            CHECK_BOOL(v.data == before.data && v.end == before.end &&
+                           v.cap == before.cap,
+                       "pop_back 失败时三个指针应该保持不变");
+            CHECK_EQ(size(&v), 0, "pop_back 失败时 size 应该保持不变");
+            CHECK_EQ(capacity(&v), capacities[scenario],
+                     "pop_back 失败时 capacity 应该保持不变");
+            for (size_t index = 0; index < 4; index++) {
+                out = sentinels[sentinel];
+                CHECK_EQ(get(&v, indices[index], &out), -1,
+                         "空 vector 的 get 应该返回 -1");
+                CHECK_EQ(out, sentinels[sentinel], "get 失败时不应该写入 *out");
+            }
+        }
+        for (size_t index = 0; index < 4; index++) {
+            CHECK_EQ(set(&v, indices[index], 1), -1,
+                     "空 vector 的 set 应该返回 -1");
+        }
+        CHECK_EQ(size(&v), 0, "失败的 set 不应该让 size 变大");
+        CHECK_EQ(capacity(&v), capacities[scenario],
+                 "失败的 set 不应该改变容量");
 
-    CHECK_EQ(front(&v, &out), -1, "空 vector 的 front 应该返回 -1");
-    CHECK_NOT_WRITTEN(out, "front 失败时不应该写入 *out");
-    CHECK_EQ(back(&v, &out), -1, "空 vector 的 back 应该返回 -1");
-    CHECK_NOT_WRITTEN(out, "back 失败时不应该写入 *out");
+        CHECK_OK(push_back(&v, 5), "push_back 应该成功");
+        CHECK_EQ(FRONT(&v), 5, "front 应该读到 5");
+        CHECK_EQ(BACK(&v), 5, "back 应该读到 5");
+        vector_destroy(&v);
+    }
+}
 
-    CHECK_EQ(get(&v, 0, &out), -1, "空 vector 的 get(0) 应该返回 -1");
-    CHECK_NOT_WRITTEN(out, "get 失败时不应该写入 *out");
-    CHECK_EQ(set(&v, 0, 1), -1, "空 vector 的 set(0, ...) 应该返回 -1");
-    CHECK_EQ(size(&v), 0, "失败的 set 不应该让 size 变大");
-
-    CHECK_OK(push_back(&v, 5), "push_back 应该成功");
-    CHECK_EQ(front(&v, &out), 0, "非空 vector 的 front 应该成功");
-    CHECK_EQ(out, 5, "front 应该读到 5");
-    CHECK_EQ(back(&v, &out), 0, "非空 vector 的 back 应该成功");
-    CHECK_EQ(out, 5, "back 应该读到 5");
-
+static void test_int_values(void) {
+    const int values[] = {INT_MIN, -1, 0, INT_MAX};
+    vector v = make_vector(0);
+    for (size_t index = 0; index < 4; index++) {
+        CHECK_OK(push_back(&v, values[index]), "所有 int 值都应该可以存入");
+    }
+    for (size_t index = 0; index < 4; index++) {
+        int out = 234;
+        CHECK_OK(get(&v, index, &out), "极值元素应该可以读取");
+        CHECK_EQ(out, values[index], "读取结果应该保留完整 int 值");
+        CHECK_OK(set(&v, index, values[3 - index]), "极值元素应该可以设置");
+        out = 234;
+        CHECK_OK(get(&v, index, &out), "设置后应该可以读取");
+        CHECK_EQ(out, values[3 - index], "set 应该保留完整 int 值");
+    }
+    int out = 234;
+    CHECK_OK(front(&v, &out), "front 应该成功");
+    CHECK_EQ(out, INT_MAX, "front 应该保留 INT_MAX");
+    out = 234;
+    CHECK_OK(back(&v, &out), "back 应该成功");
+    CHECK_EQ(out, INT_MIN, "back 应该保留 INT_MIN");
+    for (size_t index = 0; index < 4; index++) {
+        CHECK_EQ(POP(&v), values[index], "pop_back 应该保留完整 int 值");
+    }
+    CHECK_EQ(size(&v), 0, "弹出全部极值元素后应该为空");
     vector_destroy(&v);
 }
 
 static void test_capacity_limit(void) {
     /* 超过上限：必须在动手分配之前就拒绝 */
-    vector a = {NULL, NULL, NULL};
+    int sentinel = 123;
+    vector a = {&sentinel, &sentinel, &sentinel};
     CHECK_EQ(vector_init(&a, SIZE_MAX), -1, "capacity 超过上限时应该返回 -1");
     CHECK_BOOL(a.data == NULL && a.end == NULL && a.cap == NULL,
                "vector_init 失败后三个指针应该都是 NULL");
 
     /* 刚好越过上限：capacity * sizeof(int) 在这里会回绕，
      * 漏掉上限检查的实现会以为分配成功了，然后返回 0 */
-    vector b = {NULL, NULL, NULL};
+    vector b = {&sentinel, &sentinel, &sentinel};
     CHECK_EQ(vector_init(&b, SIZE_MAX / sizeof(int) + 1), -1,
              "capacity 刚好超过上限时应该返回 -1");
-    CHECK_BOOL(b.data == NULL, "vector_init 失败后 data 应该是 NULL");
+    CHECK_BOOL(b.data == NULL && b.end == NULL && b.cap == NULL,
+               "vector_init 失败后三个指针应该都是 NULL");
 
     /* 上限之内但系统给不出来：这就是真的分配失败，同样要干净地返回 -1 */
-    vector c = {NULL, NULL, NULL};
+    vector c = {&sentinel, &sentinel, &sentinel};
     CHECK_EQ(vector_init(&c, SIZE_MAX / sizeof(int)), -1,
              "系统给不出这么多内存时应该返回 -1");
     CHECK_BOOL(c.data == NULL && c.end == NULL && c.cap == NULL,
@@ -471,6 +578,7 @@ int main(void) {
     run_case("push_back / size", test_push_back);
     run_case("自动扩容", test_auto_grow);
     run_case("get / set / front / back", test_access);
+    run_case("int 极值与负数", test_int_values);
     run_case("pop_back", test_pop_back);
     run_case("reserve", test_reserve);
     run_case("shrink_to_fit", test_shrink_to_fit);

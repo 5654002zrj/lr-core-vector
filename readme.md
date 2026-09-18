@@ -4,6 +4,8 @@
 
 [vector 原理可视化](https://lingrui-studio.github.io/vector-playground/)
 
+本题实现的是只存储 `int` 的教学版动态数组，具体约定以 [include/vector.h](include/vector.h) 为准。
+
 ## 目录结构
 
 ```
@@ -22,9 +24,9 @@ lr-core-vector/
 
 ## 自检
 
-项目根目录运行 `make test` 测试，全部通过即可。
+项目根目录运行 `make test`，检查功能测试全部通过，并核对实现是否符合接口约定。
 
-默认开着 ASan + UBSan，常见错误会被直接指出来，例如：
+测试始终开启 ASan + UBSan，检测到错误会以失败状态退出，不提供关闭开关。常见错误会被直接指出来，例如：
 
 ```
 ERROR: AddressSanitizer: heap-buffer-overflow on address 0x... at pc 0x...
@@ -33,6 +35,12 @@ READ of size 4 at 0x... thread T0
 ```
 
 行号会直接指到出问题的那一行，看不懂的把完成代码和报错信息复制给 AI 问一下。
+
+## 测试维护
+
+维护题目时可运行 `sh tests/run_audit.sh`。它通过同一个 Makefile 将独立基准和错误变体链接到正式测试，检查正常实现通过、错误实现失败，不修改学生源码。
+
+[tests/audit_probe.c](tests/audit_probe.c) 包含教师侧参考实现和故意错误的变体，不属于学生提交内容；发布学生练习包时不应包含该文件。修复记录见 [AUDIT.md](AUDIT.md)。
 
 ## 提交
 

@@ -1,0 +1,51 @@
+name: Score Report
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build and test
+        id: tests
+        shell: bash
+        run: make -B test 2>&1 | tee score-report.log
+
+      - name: Write score report
+        if: always()
+        shell: bash
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          score=0
+          if [[ "$TEST_OUTCOME" == success ]]; then
+            score=100
+          fi
+          {
+            printf '# Score Report\n\n'
+            printf 'Score: **%s / 100**\n\n' "$score"
+            printf 'Test outcome: **%s**\n\n' "$TEST_OUTCOME"
+            printf 'Full marks require `make test` to finish successfully with ASan and UBSan enabled.\n\n'
+            printf 'See the Build and test step or the test-log artifact for details.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log
+          path: score-report.log
+          if-no-files-found: warn
+          retention-days: 14
