@@ -48,4 +48,4 @@ jobs:
           name: test-log
           path: score-report.log
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 35
