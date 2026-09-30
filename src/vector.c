@@ -6,8 +6,7 @@ int vector_init(vector *v, size_t capacity) {
     return 0;
 }
 
-void vector_destroy(vector *v) {
-}
+void vector_destroy(vector *v) {}
 
 size_t size(const vector *v) {
     return 0;
@@ -45,7 +44,7 @@ int pop_back(vector *v, int *out) {
     return 0;
 }
 
-int reserve(vector *v, size_t capacity) {
+int reserve(vector *v, size_t new_capacity) {
     return 0;
 }
 
@@ -53,5 +52,4 @@ int shrink_to_fit(vector *v) {
     return 0;
 }
 
-void clear(vector *v) {
-}
+void clear(vector *v) {}
